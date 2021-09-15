@@ -21,15 +21,24 @@ def RemoveOverflowImage(fits_list):
     print(count, "overflow files removed.")
     return fits_list
 
-def OverflowJudge(fits):
+def OverflowJudge(fits, type='value'):
     """A function to tell if the given fits data have overflow points or not by
     checking the number of max points."""
     map = sunpy.map.Map(fits)
-    pixel_pos = np.argwhere(map.data == map.data.max())
-    if len(pixel_pos) > 1:
-        return True
+
+    if type == 'max':
+        pixel_pos = np.argwhere(map.data == map.data.max())
+        criteria = 1
+    elif type == 'value':
+        pixel_pos = np.argwhere(map.data > 16000) # 标准针对aia euv估计的
+        criteria = 10
+
+    if len(pixel_pos) > criteria:
+        flag = True
     else:
-        return False
+        flag = False
+
+    return flag
 
 def GetMultiChannelData(event_dir, wavelengths, target_wave = '1216A'):
     """Get a time aligned fits list with multiple channel. HMI continuum being
