@@ -1,4 +1,5 @@
 # A series of function to prepare data for GAN
+from numpy.lib.function_base import delete
 import flares as fl
 import sunpy.map
 import numpy as np
@@ -8,14 +9,15 @@ import astropy.units as u
 
 from sunpy.time import parse_time as ParseTime
 from astropy.io import fits as fts
+from reproject import reproject_interp
 
 
-def RemoveOverflowImage(fits_list):
+def RemoveOverflowImage(fits_list, type='value'):
     """Remove image with duplicate max points, i.e. with overflow pixels."""
     print('Removing overflow files...')
     count = 0
     for fits in fits_list:
-        if OverflowJudge(fits):
+        if OverflowJudge(fits, type):
             fits_list.remove(fits)
             count += 1
     print(count, "overflow files removed.")
@@ -32,7 +34,6 @@ def OverflowJudge(fits, type='value'):
     elif type == 'value':
         pixel_pos = np.argwhere(map.data > 16000) # 标准针对aia euv估计的
         criteria = 10
-
     if len(pixel_pos) > criteria:
         flag = True
     else:
@@ -130,8 +131,13 @@ def SaveDSFitsList(dataset_fits_list, cut_radius, out_radius, output_dir, type='
     
     Should work on vault as well.
     
-    type = wl: cut around max point, fit for flares.
-    type = lya: cut around center point, fit for lya images."""
+    type = whitelight: cut around max point, fit for flares.
+    type = lya_vault/lya_hri: cut around center point, fit for lya images of
+    vault or HRI. There is some difference in the coordinate transformation.
+    Specifically, rotation angle is different.
+    
+    cut_radius for vault: 270
+    cut_radius for HRI: 400 """
     channels = len(dataset_fits_list[0])
     paths = []
     # Create output directory for multiple channels
@@ -142,32 +148,40 @@ def SaveDSFitsList(dataset_fits_list, cut_radius, out_radius, output_dir, type='
         paths.append(path)
     # 开始裁剪和存储
     for set in dataset_fits_list:
-        # 全日面的处理，只做resample
-        if type == 'full_disk':
+        # To make full disk dataset: coalign the edge and resample.
+        if type is 'full_disk':
             for i in range(channels):
                 map = sunpy.map.Map(set[i])
+                if i == 9: # coalign
+                    map_aia = sunpy.map.Map(set[0])
+                    output, footprint = reproject_interp((map.data, map.wcs), map_aia.wcs, map_aia.data.shape)
+                    map = sunpy.map.Map(output, map_aia.wcs)
                 fl.square_cut(map, None, None, [out_radius*2, out_radius*2], paths[i])
 
-        else:
+        # To make regional dataset: rotate, align the regions, cutout and resample. 
+        if type is not 'full_disk':
             proceed = False # To avoid the bug of max point outside of solar disk
-            while not proceed is True:
+            j = 0
+            while j < 8 and proceed is False:
                 temp_files = []
-                j = 0
                 try:
                     # 根据type选项找剪裁中心点
                     if type == 'whitelight':
                         coord = fl.find_max_coord(set[j])
-                    elif type == 'lya':
+                    elif type == 'lya_vault' or 'lya_hri':
                         coord = fl.find_center_coord(set[-1])
-                    bottom_left, top_right = fl.get_diag_coord(sunpy.map.Map(set[j]),
-                    coord, cut_radius)
+
+                    bottom_left, top_right = fl.get_diag_coord(sunpy.map.Map(set[j]),\
+                        coord, cut_radius)
                     # 剪裁并储存文件，同时先记录文件名
                     for i in range(channels):
                         map = sunpy.map.Map(set[i])
-                        if type == 'lya' and i != 9:
-                            map = map.rotate(angle=18 * u.deg) # 旋转aia图像以对正
+                        if type == 'lya_vault' and i != 9:
+                            map = map.rotate(angle = 18 * u.deg) # 旋转aia图像以对正 # 为什么要转aia不转lya啊淦。可能是为了和示例那个对比吧。
+                        if type == 'lya_hri' and i == 9:
+                            map = map.rotate(angle = 6.48 * u.deg)
                         temp_file = fl.square_cut(map, bottom_left,
-                        top_right, [out_radius*2, out_radius*2], paths[i])
+                            top_right, [out_radius*2, out_radius*2], paths[i])
                         temp_files.append(temp_file)
                 # 若出错，删除这些文件
                 except ValueError:
@@ -179,12 +193,15 @@ def SaveDSFitsList(dataset_fits_list, cut_radius, out_radius, output_dir, type='
                 else:
                     proceed = True
 
-def OverflowDSRemove(dataset_fits_list):
+def OverflowDSRemove(dataset_fits_list, type):
+    delete_sets = []
     for set in dataset_fits_list:
         for fits in set:
-            if OverflowJudge(fits) is True:
-                dataset_fits_list.remove(set)
+            if OverflowJudge(fits, type) is True:
+                delete_sets.append(set)
                 break
+    for set in delete_sets:
+        dataset_fits_list.remove(set)
     return dataset_fits_list
         
 def AIAPrep(fits, Scaler, Cropper):
@@ -198,11 +215,12 @@ def AIAPrep(fits, Scaler, Cropper):
     data = Cropper(data)
     return data[0]
 
-def HMIPrep(fits, Scaler, Cropper):
+def HMIPrep(fits, Scaler, Cropper, flip=True):
     map = sunpy.map.Map(fits)
     data = map.data
-    data = np.flip(data, axis=0)
-    data = np.flip(data, axis=1)
+    if flip is True:
+        data = np.flip(data, axis=0)
+        data = np.flip(data, axis=1)
     data[np.where(np.isnan(data))] = 0
     # substitute 'nan' with 0 for hmi
     data = Scaler(data)
